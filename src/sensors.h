@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include <stddef.h>
 
 typedef enum {
     TYPE_S_THP_01A,
@@ -24,4 +25,4 @@ typedef struct {
 } capteur_t;
 
 extern capteur_t capteurs[];
-extern const int NB_CAPTEURS;
+extern const size_t NB_CAPTEURS;

@@ -24,3 +24,17 @@ ce qui le rend particulièrement adapté lorsque les unités à surveiller sont 
 
 La transmission des données vers l’infrastructure hospitalière s’effectue via une passerelle ESP32 reliée en Ethernet.  
 La liaison entre le module Nordic et l’ESP32 est assurée par Bluetooth Low Energy (BLE) ou en UART, permettant d’isoler la couche capteurs de la couche réseau.
+
+## Avant de commencer — Configuration des capteurs
+
+Avant d'intégrer les capteurs dans le système de monitoring complet, des étapes préalables sont nécessaires :
+
+**Vérifier le bon fonctionnement de chaque capteur individuellement**
+
+Avant de connecter plusieurs capteurs sur le même bus, assurez-vous que chacun fonctionne correctement de manière indépendante. Le dépôt dédié fournit des scripts prêts à l'emploi pour scanner, lire et configurer chaque capteur supporté :
+
+ **https://github.com/AngeEcam/modbus-rs485-sensor-utils**
+
+**Attribuer une adresse Slave ID unique à chaque capteur**
+
+Tous les capteurs partagent le même bus RS485, chacun doit donc avoir une adresse Modbus unique (1–247) pour éviter les conflits. Utilisez le script `set_slave_ID_sthp01a.py` du dépôt dédié pour attribuer une adresse différente à chaque capteur avant de les connecter ensemble.

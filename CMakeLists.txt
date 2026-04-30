@@ -6,6 +6,7 @@ target_sources(app PRIVATE
     src/main.c
     src/modbus/modbus.c
     src/sensors/sthp01a.c
+    src/sensors/hailege_sht20.c
 )
 
 target_include_directories(app PRIVATE src)

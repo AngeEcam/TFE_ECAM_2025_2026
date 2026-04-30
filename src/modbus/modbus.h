@@ -7,6 +7,7 @@
 
 /* Fonction codes */
 #define MODBUS_FC_READ_INPUT_REGISTERS  0x04
+#define MODBUS_FC_READ_HOLDING_REGISTERS  0x03
 
 /* Calcul CRC16 Modbus */
 uint16_t modbus_crc16(const uint8_t *buf, uint16_t len);
@@ -27,5 +28,12 @@ int modbus_read_input_registers(const struct device *uart,
                                 uint16_t reg_count,
                                 uint8_t *resp,
                                 size_t resp_len);
+
+int modbus_read_holding_registers(const struct device *uart,
+                                  uint8_t slave_id,
+                                  uint16_t reg_start,
+                                  uint16_t reg_count,
+                                  uint8_t *resp,
+                                  size_t resp_len);
 
 #endif /* MODBUS_H */

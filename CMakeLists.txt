@@ -6,7 +6,7 @@ target_sources(app PRIVATE
     src/main.c
     src/modbus/modbus.c
     src/sensors/sthp01a.c
-    src/sensors/hailege_sht20.c
+    src/sensors/xymd04.c
     src/sensors/pt100_pta8c04.c
     src/storage/fifo_storage.c
 )

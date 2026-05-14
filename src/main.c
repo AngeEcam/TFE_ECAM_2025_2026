@@ -1,5 +1,5 @@
 /*
- * HMRA Monitor — main.c
+ * HMRA Monitor — main.c  v1.3
  * Corrections appliquées :
  *  1. Stack du thread capteurs augmenté à 4096 bytes
  *  2. Structs capteurs déclarées static → hors du stack
@@ -7,6 +7,11 @@
  *  4. json déclaré static dans flush_fifo_over_nus
  *  5. Timeout de connexion BLE watchdog
  *  6. Commentaires clairs sur chaque section
+ *  7. memset sur r, r1, r2 avant chaque utilisation
+ *  8. Sémaphore cycle_done_sem : flush déclenché uniquement après
+ *     lecture complète de tous les capteurs du cycle
+ *  9. JSON groupé : tous les records du cycle envoyés en UN SEUL
+ *     paquet BLE → élimine le drop de notifications ESP32
  */
 
 #include <zephyr/kernel.h>
@@ -35,25 +40,26 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 /* ─── Timing ─────────────────────────────────────────────────────── */
 #define SENSOR_POLL_MS       60000   /* Intervalle lecture capteurs    */
-#define BLE_FLUSH_MS         1000    /* Intervalle envoi BLE           */
-#define NUS_INTER_MSG_MS     50      /* Délai entre deux paquets NUS   */
+#define BLE_FLUSH_TIMEOUT_MS 5000    /* Timeout attente sémaphore      */
 #define NUS_MAX_RECORDS      5       /* Max records par cycle flush    */
 #define BLE_READY_TIMEOUT_MS 3000    /* Timeout attente MTU exchange   */
 
 /* ─── Thread capteurs ────────────────────────────────────────────── */
-/*
- * CORRECTION #1 : Stack augmenté de 2048 → 4096 bytes.
- * Raison : les structs capteurs + sensor_record_t empilés à chaque
- * itération dépassaient les 2048 bytes après quelques cycles,
- * provoquant un stack overflow silencieux qui corrompait la mémoire
- * et bloquait l'envoi des capteurs 2, 3, 4 après 5-10 minutes.
- */
 #define SENSOR_THREAD_STACK  4096
 #define SENSOR_THREAD_PRIO   5
 
+/* ─── Sémaphore synchronisation cycle capteurs → flush BLE ──────── */
+/*
+ * CORRECTION #8 : le flush BLE attend ce sémaphore avant d'envoyer.
+ * Le sensor_thread le donne UNE SEULE FOIS après avoir lu et pushé
+ * TOUS les capteurs du cycle. Ainsi, quand flush_fifo_over_nus()
+ * est appelé, le FIFO contient déjà tous les records du cycle.
+ */
+K_SEM_DEFINE(cycle_done_sem, 0, 1);
+
 /* ─── État BLE global ────────────────────────────────────────────── */
-static struct bt_conn              *current_conn = NULL;
-static bool                         ble_ready    = false;
+static struct bt_conn               *current_conn = NULL;
+static bool                          ble_ready    = false;
 static struct bt_gatt_exchange_params mtu_params;
 
 /* ─── Advertising data ───────────────────────────────────────────── */
@@ -96,10 +102,6 @@ static void connected(struct bt_conn *conn, uint8_t err)
     int ret = bt_gatt_exchange_mtu(conn, &mtu_params);
     if (ret) {
         LOG_WRN("bt_gatt_exchange_mtu err %d — activation differee", ret);
-        /*
-         * Si l'exchange MTU échoue immédiatement, on attend un peu
-         * et on active quand même pour ne pas bloquer indéfiniment.
-         */
         k_sleep(K_MSEC(BLE_READY_TIMEOUT_MS));
         ble_ready = true;
     }
@@ -141,16 +143,6 @@ static void sensor_thread(void *p1, void *p2, void *p3)
 {
     const struct device *uart = (const struct device *)p1;
 
-    /*
-     * CORRECTION #2 : toutes les structs capteurs et records sont
-     * déclarées STATIC.
-     *
-     * Sans static, elles sont allouées sur le stack à chaque passage
-     * dans la boucle while(1). Avec static, elles sont placées une
-     * seule fois dans le BSS (mémoire statique) au démarrage et ne
-     * consomment jamais de stack. Cela élimine le stack overflow
-     * progressif responsable du blocage après 5-10 minutes.
-     */
     static sthp01a_data_t       s1;
     static xymd04_data_t        s2;
     static xymd04_data_t        s4;
@@ -165,13 +157,14 @@ static void sensor_thread(void *p1, void *p2, void *p3)
     while (1) {
         uint32_t ts = (uint32_t)(k_uptime_get() / 1000U);
 
-        /* ── Diagnostic stack (à désactiver en production) ───────── */
+        /* ── Diagnostic stack ────────────────────────────────────── */
         size_t stack_unused = 0;
         k_thread_stack_space_get(&sensor_thread_data, &stack_unused);
         LOG_DBG("Stack libre: %zu bytes", stack_unused);
 
         /* ── STHP01A ─────────────────────────────────────────────── */
         memset(&s1, 0, sizeof(s1));
+        memset(&r,  0, sizeof(r));
         if (sthp01a_read(uart, SLAVE_ID_STHP01A, &s1)) {
             r = (sensor_record_t){
                 .timestamp = ts,
@@ -194,6 +187,7 @@ static void sensor_thread(void *p1, void *p2, void *p3)
 
         /* ── XY-MD04 #1 ──────────────────────────────────────────── */
         memset(&s2, 0, sizeof(s2));
+        memset(&r,  0, sizeof(r));
         if (xymd04_read(uart, SLAVE_ID_XYMD04, &s2)) {
             r = (sensor_record_t){
                 .timestamp = ts,
@@ -215,6 +209,7 @@ static void sensor_thread(void *p1, void *p2, void *p3)
 
         /* ── XY-MD04 #2 ──────────────────────────────────────────── */
         memset(&s4, 0, sizeof(s4));
+        memset(&r,  0, sizeof(r));
         if (xymd04_read(uart, SLAVE_ID_XYMD04_2, &s4)) {
             r = (sensor_record_t){
                 .timestamp = ts,
@@ -236,6 +231,8 @@ static void sensor_thread(void *p1, void *p2, void *p3)
 
         /* ── PT100 (2 canaux) ────────────────────────────────────── */
         memset(&s3, 0, sizeof(s3));
+        memset(&r1, 0, sizeof(r1));
+        memset(&r2, 0, sizeof(r2));
         if (pt100_pta8c04_read(uart, SLAVE_ID_PT100, &s3)) {
             r1 = (sensor_record_t){
                 .timestamp = ts,
@@ -264,13 +261,29 @@ static void sensor_thread(void *p1, void *p2, void *p3)
             LOG_WRN("PT100: echec lecture");
         }
 
+        /* ── Cycle complet — signal au flush BLE ─────────────────── */
+        k_sem_give(&cycle_done_sem);
+
         /* ── Attente avant prochain cycle ────────────────────────── */
         k_sleep(K_MSEC(SENSOR_POLL_MS));
     }
 }
 
 /* ═══════════════════════════════════════════════════════════════════
- * Flush FIFO → NUS
+ * Flush FIFO → NUS (JSON groupé)
+ * ═══════════════════════════════════════════════════════════════════
+ *
+ * CORRECTION #9 : au lieu d'envoyer N notifications BLE séparées
+ * (une par capteur), on groupe tous les records du cycle dans un
+ * seul paquet JSON et on fait UN SEUL bt_nus_send.
+ *
+ * Format : {"ts":2135,"d":[{"sid":1,"t":225,"h":411,"p":9948},
+ *                          {"sid":2,"t":263,"h":338,"p":0},
+ *                          {"sid":5,"t":246,"h":349,"p":0}]}
+ *
+ * Avantage : zéro risque de drop de notification BLE côté ESP32,
+ * peu importe la vitesse du stack Espressif.
+ * Le MTU est 247 bytes → largement suffisant pour 5 capteurs.
  * ═══════════════════════════════════════════════════════════════════ */
 
 static void flush_fifo_over_nus(void)
@@ -279,53 +292,54 @@ static void flush_fifo_over_nus(void)
         return;
     }
 
-    /*
-     * CORRECTION #3 : json déclaré static pour ne pas consommer
-     * de stack dans la boucle principale à chaque appel.
-     */
-    static sensor_record_t r;
-    static char            json[160];
-    int sent = 0;
+    static sensor_record_t records[NUS_MAX_RECORDS];
+    static char            json[247];   /* MTU max */
+    int count = 0;
 
-    while (sent < NUS_MAX_RECORDS && fifo_pop(&r)) {
-
-        int len = snprintf(json, sizeof(json),
-                           "{\"ts\":%u,\"sid\":%u,"
-                           "\"t\":%d,\"h\":%u,\"p\":%u,\"f\":%u}\n",
-                           r.timestamp,
-                           (unsigned)r.sensor_id,
-                           (int)r.temp,
-                           (unsigned)r.humidity,
-                           (unsigned)r.pressure,
-                           (unsigned)r.flags);
-
-        if (len <= 0 || len >= (int)sizeof(json)) {
-            LOG_ERR("snprintf overflow — record ignore");
-            continue;
-        }
-
-        int err = bt_nus_send(current_conn,
-                              (const uint8_t *)json,
-                              (uint16_t)len);
-        if (err) {
-            /*
-             * CORRECTION #4 : on remet le record dans la FIFO
-             * seulement si bt_nus_send échoue, pour ne pas perdre
-             * de données. On sort de la boucle pour laisser le
-             * scheduler BLE respirer.
-             */
-            fifo_push(&r);
-            LOG_WRN("NUS TX err %d — %d records en attente",
-                    err, fifo_count());
-            break;
-        }
-
-        sent++;
-        k_sleep(K_MSEC(NUS_INTER_MSG_MS));
+    /* ── Collecter tous les records disponibles dans le FIFO ─────── */
+    while (count < NUS_MAX_RECORDS && fifo_pop(&records[count])) {
+        count++;
     }
 
-    if (sent > 0) {
-        LOG_INF("NUS TX: %d envoyes, %d en attente", sent, fifo_count());
+    if (count == 0) {
+        return;
+    }
+
+    /* ── Construire le JSON groupé ───────────────────────────────── */
+    int pos = 0;
+    pos += snprintf(json + pos, sizeof(json) - pos,
+                    "{\"ts\":%u,\"d\":[",
+                    records[0].timestamp);
+
+    for (int i = 0; i < count; i++) {
+        pos += snprintf(json + pos, sizeof(json) - pos,
+                        "%s{\"sid\":%u,\"t\":%d,\"h\":%u,\"p\":%u}",
+                        i > 0 ? "," : "",
+                        (unsigned)records[i].sensor_id,
+                        (int)records[i].temp,
+                        (unsigned)records[i].humidity,
+                        (unsigned)records[i].pressure);
+
+        if (pos >= (int)sizeof(json) - 10) {
+            LOG_ERR("JSON overflow a l'element %d", i);
+            break;
+        }
+    }
+
+    pos += snprintf(json + pos, sizeof(json) - pos, "]}\n");
+
+    /* ── Envoyer en un seul paquet BLE ───────────────────────────── */
+    int err = bt_nus_send(current_conn,
+                          (const uint8_t *)json,
+                          (uint16_t)pos);
+    if (err) {
+        LOG_WRN("NUS TX err %d — requeue %d records", err, count);
+        for (int i = 0; i < count; i++) {
+            fifo_push(&records[i]);
+        }
+    } else {
+        LOG_INF("NUS TX OK — %d records ts=%u : %s",
+                count, records[0].timestamp, json);
     }
 }
 
@@ -335,7 +349,7 @@ static void flush_fifo_over_nus(void)
 
 int main(void)
 {
-    LOG_INF("HMRA Monitor v1.1 — demarrage");
+    LOG_INF("HMRA Monitor v1.3 — demarrage");
 
     /* ── UART ────────────────────────────────────────────────────── */
     const struct device *uart = DEVICE_DT_GET(DT_NODELABEL(uart0));
@@ -384,8 +398,10 @@ int main(void)
 
     /* ── Boucle principale : flush FIFO → BLE ────────────────────── */
     while (1) {
-        flush_fifo_over_nus();
-        k_sleep(K_MSEC(BLE_FLUSH_MS));
+        if (k_sem_take(&cycle_done_sem,
+                       K_MSEC(BLE_FLUSH_TIMEOUT_MS)) == 0) {
+            flush_fifo_over_nus();
+        }
     }
 
     return 0;

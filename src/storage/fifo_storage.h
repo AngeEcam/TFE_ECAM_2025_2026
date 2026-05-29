@@ -28,7 +28,7 @@ extern "C" {
  *  Pour 24 h il faudrait 8640 × 16 = 135 Ko > RAM disponible.
  *  Augmenter FIFO_SIZE uniquement après vérification de l'usage RAM réel.
  */
-#define FIFO_SIZE       1200U   /* nombre maximum d'entrées                 */
+#define FIFO_SIZE       1440U    /* nombre maximum d'entrées                 */
 #define FIFO_SIZE_BYTES (FIFO_SIZE * sizeof(sensor_record_t))  /* ≈ 34 Ko  */
 
 /* ─── Identificateurs de capteurs ──────────────────────────────────────────*/
